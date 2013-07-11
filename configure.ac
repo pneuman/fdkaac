@@ -51,6 +51,32 @@ esac
 AM_CONDITIONAL([FDK_PLATFORM_POSIX],[test "$X_PLATFORM" = "posix"])
 AM_CONDITIONAL([FDK_PLATFORM_WIN32],[test "$X_PLATFORM" = "win32"])
 
+
+AC_ARG_WITH(sndfile, [  --with-sndfile            use libsndfile for file IO])
+if test "$with_sndfile" == "yes"
+then
+    #AC_MSG_NOTICE([You  enabled stuff. Good for you.])
+    PKG_CHECK_MODULES(SNDFILE, sndfile >= 1.0.2, HAVE_SNDFILE="yes", HAVE_SNDFILE="no")
+
+    if test "${HAVE_SNDFILE}" = "yes"
+    then
+        SNDFILE_LIBS=`echo ${SNDFILE_LIBS}`
+        SNDFILE_CFLAGS=`echo ${SNDFILE_CFLAGS}`
+
+        if test -n "${SNDFILE_LIBS}" ; then
+            LIBS="${SNDFILE_LIBS} ${LIBS}"
+        fi
+        LIBS="-lsndfile ${LIBS}"
+
+        if test -n "${SNDFILE_CFLAGS}" ; then
+            CFLAGS="${SNDFILE_CFLAGS} ${CFLAGS}"
+        fi
+        AC_DEFINE(USE_LIBSNDFILE, 1, set to 1 if you have libsndfile)
+    else
+        AC_MSG_WARN("no libsndfile found on system")
+    fi
+fi
+
 AC_CONFIG_FILES([Makefile])
 
 AC_OUTPUT

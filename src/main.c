@@ -1,3 +1,4 @@
+//#define USE_LIBSNDFILE 
 /* 
  * Copyright (C) 2013 nu774
  * For conditions of distribution and use, see copyright notice in COPYING
@@ -39,6 +40,10 @@
 #include "progress.h"
 #include "version.h"
 #include "metadata.h"
+
+#ifdef USE_LIBSNDFILE
+#include "sndfile.h"
+#endif
 
 #define PROGNAME "fdkaac"
 
@@ -486,6 +491,67 @@ int write_sample(FILE *ofp, m4af_ctx_t *m4af,
     return 0;
 }
 
+#ifdef USE_LIBSNDFILE
+static
+int encode_sndfile(SNDFILE* snd, SF_INFO* info, pcm_sample_description_t* format,
+           HANDLE_AACENCODER encoder,
+           uint32_t frame_length, FILE *ofp, m4af_ctx_t *m4af,
+           int show_progress)
+{
+    short *ibuf = 0;
+    int16_t *pcmbuf = 0;
+    uint32_t pcmsize = 0;
+    uint8_t *obuf = 0;
+    uint32_t olen;
+    uint32_t osize = 0;
+    int nread = 1;
+    int consumed;
+    int rc = -1;
+    int frames_written = 0;
+    aacenc_progress_t progress = { 0 };
+
+    ibuf = malloc(frame_length * format->bytes_per_frame);
+    aacenc_progress_init(&progress, info->frames, info->samplerate);
+    do {
+        if (g_interrupted)
+            nread = 0;
+        else if (nread) {
+            if ((nread = sf_readf_short(snd, ibuf, frame_length)) < 0) {
+                fprintf(stderr, "ERROR: read failed\n");
+                goto END;
+            } else if (nread > 0) {
+                if (pcm_convert_to_native_sint16(format, ibuf, nread,
+                                                 &pcmbuf, &pcmsize) < 0) {
+                    fprintf(stderr, "ERROR: unsupported sample format\n");
+                    goto END;
+                }
+            }
+            if (show_progress)
+                aacenc_progress_update(&progress, sf_seek(snd, 0, SEEK_CUR),
+                                       info->samplerate * 2);
+        }
+        if ((consumed = aac_encode_frame(encoder, format, pcmbuf, nread,
+                                         &obuf, &olen, &osize)) < 0)
+            goto END;
+        if (olen > 0) {
+            if (write_sample(ofp, m4af, obuf, olen, frame_length) < 0)
+                goto END;
+            ++frames_written;
+        }
+    } while (nread > 0 || olen > 0);
+
+    if (show_progress)
+        aacenc_progress_finish(&progress, sf_seek(snd, 0, SEEK_CUR));
+    rc = frames_written;
+END:
+    if (ibuf) free(ibuf);
+    if (pcmbuf) free(pcmbuf);
+    if (obuf) free(obuf);
+    return rc;
+}
+#endif
+
+
 static
 int encode(wav_reader_t *wavf, HANDLE_AACENCODER encoder,
            uint32_t frame_length, FILE *ofp, m4af_ctx_t *m4af,
@@ -650,6 +716,21 @@ int parse_raw_spec(const char *spec, pcm_sample_description_t *desc)
     return 0;
 }
 
+#ifdef USE_LIBSNDFILE
+static
+int parse_sndfile_spec_blah(SF_INFO* info, pcm_sample_description_t *desc)
+{
+    int type,bits;
+    
+    if(info->format & SF_FORMAT_FLOAT) {
+        type = PCM_TYPE_FLOAT;
+    } 
+    desc->sample_type = type;
+    desc->bits_per_channel = bits;
+    return 0;
+}
+#endif
+
 int main(int argc, char **argv)
 {
     wav_io_context_t wav_io = { read_callback, seek_callback, tell_callback };
@@ -661,7 +742,13 @@ int main(int argc, char **argv)
     FILE *ifp = 0;
     FILE *ofp = 0;
     char *output_filename = 0;
+#ifdef USE_LIBSNDFILE
+    SNDFILE* snd = NULL;
+    SF_INFO snd_info;
+    pcm_sample_description_t snd_desc = { 0 };
+#else
     wav_reader_t *wavf = 0;
+#endif
     HANDLE_AACENCODER encoder = 0;
     AACENC_InfoStruct aacinfo = { 0 };
     m4af_ctx_t *m4af = 0;
@@ -676,15 +763,31 @@ int main(int argc, char **argv)
     if (parse_options(argc, argv, &params) < 0)
         return 1;
 
+#ifdef USE_LIBSNDFILE
+    if ((snd = sf_open (params.input_filename, SFM_READ, &snd_info)) == NULL) {
+        fprintf(stderr, "ERROR: broken / unsupported input file\n");
+        goto END;
+    }
+    snd_desc.sample_rate = snd_info.samplerate;
+    snd_desc.channels_per_frame = snd_info.channels;
+    snd_desc.sample_type = PCM_TYPE_SINT; // always -- libsndfile does the conversion for us
+    snd_desc.bits_per_channel = sizeof(short)*8;
+    snd_desc.bytes_per_frame = snd_info.channels * (snd_desc.bits_per_channel / 8);
+    snd_desc.channel_mask = 0;
+
+    sample_format = &snd_desc;
+#else
     if ((ifp = aacenc_fopen(params.input_filename, "rb")) == 0) {
         aacenc_fprintf(stderr, "ERROR: %s: %s\n", params.input_filename,
                        strerror(errno));
         goto END;
     }
+    
     if (fstat(fileno(ifp), &stb) == 0 && (stb.st_mode & S_IFMT) != S_IFREG) {
         wav_io.seek = 0;
         wav_io.tell = 0;
     }
+    
     if (!params.is_raw) {
         if ((wavf = wav_open(&wav_io, ifp, params.ignore_length)) == 0) {
             fprintf(stderr, "ERROR: broken / unsupported input file\n");
@@ -706,7 +809,9 @@ int main(int argc, char **argv)
             goto END;
         }
     }
+
     sample_format = wav_get_format(wavf);
+#endif
 
     if (aacenc_init(&encoder, (aacenc_param_t*)&params, sample_format,
                     &aacinfo) < 0)
@@ -741,13 +846,24 @@ int main(int argc, char **argv)
         m4af_set_priming_mode(m4af, params.gapless_mode + 1);
         m4af_begin_write(m4af);
     }
+
+#ifdef USE_LIBSNDFILE
+    frame_count = encode_sndfile(snd, &snd_info, &snd_desc, encoder, aacinfo.frameLength, ofp, m4af,
+                         !params.silent);
+#else
     frame_count = encode(wavf, encoder, aacinfo.frameLength, ofp, m4af,
                          !params.silent);
+#endif
+
     if (frame_count < 0)
         goto END;
     if (m4af) {
         uint32_t delay = aacinfo.encoderDelay;
+#ifdef USE_LIBSNDFILE
+        int64_t frames_read = sf_seek(snd, 0, SEEK_CUR);
+#else
         int64_t frames_read = wav_get_position(wavf);
+#endif
         uint32_t padding = frame_count * aacinfo.frameLength
                             - frames_read - aacinfo.encoderDelay;
         m4af_set_priming(m4af, 0, delay >> downsampled_timescale,
@@ -757,8 +873,12 @@ int main(int argc, char **argv)
     }
     result = 0;
 END:
+#ifdef USE_LIBSNDFILE
+    if (snd) sf_close(snd);
+#else
     if (wavf) wav_teardown(&wavf);
     if (ifp) fclose(ifp);
+#endif
     if (m4af) m4af_teardown(&m4af);
     if (ofp) fclose(ofp);
     if (encoder) aacEncClose(&encoder);
