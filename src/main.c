@@ -588,11 +588,11 @@ int encode_sndfile(SNDFILE* snd, SF_INFO* info, pcm_sample_description_t* format
                                        info->samplerate * 2);
         }
         written = nread;
-        while(written > 0) {
-            if ((consumed = aac_encode_frame(encoder, format, pcmbuf + (nread-written), written,
+        do {
+            if ((consumed = aac_encode_frame(encoder, format, pcmbuf + (nread-written)*info->channels, written,
                                              &obuf, &olen, &osize)) < 0)
                 goto END;
-            //printf("consumed: %d olen: %d\n", consumed, olen);
+            //printf("nread: %d consumed: %d olen: %d\n", nread, consumed, olen);
             written -= (consumed / info->channels);
             if (olen > 0) {
                 if (write_sample(ofp, m4af, obuf, olen, frame_length) < 0)
@@ -600,7 +600,7 @@ int encode_sndfile(SNDFILE* snd, SF_INFO* info, pcm_sample_description_t* format
                 ++frames_written;
                 //printf("wrote frame %d\n", frames_written);
             }
-        }
+        } while (written > 0);
     } while (nread > 0 || olen > 0);
 
     if (show_progress)
