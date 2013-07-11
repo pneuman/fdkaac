@@ -1,4 +1,5 @@
-//#define USE_LIBSNDFILE 
+#define USE_LIBSAMPLERATE
+
 /* 
  * Copyright (C) 2013 nu774
  * For conditions of distribution and use, see copyright notice in COPYING
@@ -43,6 +44,9 @@
 
 #ifdef USE_LIBSNDFILE
 #include "sndfile.h"
+#endif
+#ifdef USE_LIBSAMPLERATE
+#include "samplerate.h"
 #endif
 
 #define PROGNAME "fdkaac"
@@ -160,6 +164,9 @@ PROGNAME " %s\n"
 " --ignorelength                Ignore length of WAV header\n"
 " -S, --silent                  Don't print progress messages\n"
 " --moov-before-mdat            Place moov box before mdat box on m4a output\n"
+#ifdef USE_LIBSAMPLERATE
+" --resample <rate>             Resample audio to specified rate before encoding\n"
+#endif
 "\n"
 "Options for raw (headerless) input:\n"
 " -R, --raw                     Treat input as raw (by default WAV is\n"
@@ -214,6 +221,8 @@ typedef struct aacenc_param_ex_t {
     int silent;
     int moov_before_mdat;
 
+    unsigned int resample;
+
     int is_raw;
     unsigned raw_channels;
     unsigned raw_rate;
@@ -257,6 +266,10 @@ int parse_options(int argc, char **argv, aacenc_param_ex_t *params)
         { "silent",           no_argument,       0, 'S' },
         { "moov-before-mdat", no_argument,       0, OPT_MOOV_BEFORE_MDAT   },
 
+#ifdef USE_LIBSAMPLERATE
+        { "resample",         required_argument, 0, 'X' },
+#endif
+
         { "raw",              no_argument,       0, 'R' },
         { "raw-channels",     required_argument, 0, OPT_RAW_CHANNELS       },
         { "raw-rate",         required_argument, 0, OPT_RAW_RATE           },
@@ -283,7 +296,7 @@ int parse_options(int argc, char **argv, aacenc_param_ex_t *params)
     params->afterburner = 1;
 
     aacenc_getmainargs(&argc, &argv);
-    while ((ch = getopt_long(argc, argv, "hp:b:m:w:a:Ls:f:CP:G:Io:SR",
+    while ((ch = getopt_long(argc, argv, "hp:b:m:w:a:Ls:f:CP:G:Io:SRX:",
                              long_options, 0)) != EOF) {
         switch (ch) {
         case 'h':
@@ -371,6 +384,13 @@ int parse_options(int argc, char **argv, aacenc_param_ex_t *params)
             break;
         case 'R':
             params->is_raw = 1;
+            break;
+        case 'X':
+            if (sscanf(optarg, "%u", &n) != 1) {
+                fprintf(stderr, "invalid arg for resample\n");
+                return -1;
+            }
+            params->resample = n;
             break;
         case OPT_RAW_CHANNELS:
             if (sscanf(optarg, "%u", &n) != 1) {
@@ -498,29 +518,68 @@ int encode_sndfile(SNDFILE* snd, SF_INFO* info, pcm_sample_description_t* format
            uint32_t frame_length, FILE *ofp, m4af_ctx_t *m4af,
            int show_progress)
 {
+#ifdef USE_LIBSAMPLERATE
+    //short *resamplebuf = 0;
+    SRC_STATE* srcstate = NULL;
+    SRC_DATA srcdata;
+    int srcerror = 0;
+    float *ibuf = 0;
+#else
     short *ibuf = 0;
+#endif
+
     int16_t *pcmbuf = 0;
     uint32_t pcmsize = 0;
     uint8_t *obuf = 0;
     uint32_t olen;
     uint32_t osize = 0;
     int nread = 1;
-    int consumed;
+    int consumed, written;
     int rc = -1;
     int frames_written = 0;
     aacenc_progress_t progress = { 0 };
 
     ibuf = malloc(frame_length * format->bytes_per_frame);
+#ifdef USE_LIBSAMPLERATE
+    if(format->sample_rate != info->samplerate) {
+        /* set up resampler */
+        srcstate = src_new(SRC_SINC_MEDIUM_QUALITY, info->channels, &srcerror);
+        srcdata.src_ratio = format->sample_rate; srcdata.src_ratio /= info->samplerate;
+        srcdata.data_in = ibuf;
+        srcdata.data_out = malloc(frame_length * format->bytes_per_frame * srcdata.src_ratio);
+        srcdata.end_of_input = 0;
+    }
+
+#endif
     aacenc_progress_init(&progress, info->frames, info->samplerate);
     do {
         if (g_interrupted)
             nread = 0;
         else if (nread) {
+#ifdef USE_LIBSAMPLERATE
+            if ((nread = sf_readf_float(snd, ibuf, frame_length)) < 0) {
+#else
             if ((nread = sf_readf_short(snd, ibuf, frame_length)) < 0) {
+#endif
                 fprintf(stderr, "ERROR: read failed\n");
                 goto END;
             } else if (nread > 0) {
-                if (pcm_convert_to_native_sint16(format, ibuf, nread,
+                float* in_buf = ibuf;
+#ifdef USE_LIBSAMPLERATE
+                if(srcstate) {
+                    /* run converstion */
+                    srcdata.input_frames = nread;
+                    srcdata.output_frames = frame_length;
+                    if(srcerror = src_process(srcstate, &srcdata)) {
+                        fprintf(stderr, "resample error: %s\n", src_strerror(srcerror));
+                        goto END;
+                    }
+                    //printf("resampled %d samples to %d samples\n", srcdata.input_frames_used, srcdata.output_frames_gen);
+                    in_buf = srcdata.data_out;
+                    nread = srcdata.output_frames_gen;
+                }
+#endif
+                if (pcm_convert_to_native_sint16(format, in_buf, nread,
                                                  &pcmbuf, &pcmsize) < 0) {
                     fprintf(stderr, "ERROR: unsupported sample format\n");
                     goto END;
@@ -530,13 +589,19 @@ int encode_sndfile(SNDFILE* snd, SF_INFO* info, pcm_sample_description_t* format
                 aacenc_progress_update(&progress, sf_seek(snd, 0, SEEK_CUR),
                                        info->samplerate * 2);
         }
-        if ((consumed = aac_encode_frame(encoder, format, pcmbuf, nread,
-                                         &obuf, &olen, &osize)) < 0)
-            goto END;
-        if (olen > 0) {
-            if (write_sample(ofp, m4af, obuf, olen, frame_length) < 0)
+        written = nread;
+        while(written > 0) {
+            if ((consumed = aac_encode_frame(encoder, format, pcmbuf + (nread-written), written,
+                                             &obuf, &olen, &osize)) < 0)
                 goto END;
-            ++frames_written;
+            //printf("consumed: %d olen: %d\n", consumed, olen);
+            written -= (consumed / info->channels);
+            if (olen > 0) {
+                if (write_sample(ofp, m4af, obuf, olen, frame_length) < 0)
+                    goto END;
+                ++frames_written;
+                //printf("wrote frame %d\n", frames_written);
+            }
         }
     } while (nread > 0 || olen > 0);
 
@@ -547,6 +612,12 @@ END:
     if (ibuf) free(ibuf);
     if (pcmbuf) free(pcmbuf);
     if (obuf) free(obuf);
+#ifdef USE_SAMPLERATE
+    if (srcstate) {
+        free(srcdata.data_out);
+        src_delete(srcstate);
+    }
+#endif
     return rc;
 }
 #endif
@@ -768,10 +839,21 @@ int main(int argc, char **argv)
         fprintf(stderr, "ERROR: broken / unsupported input file\n");
         goto END;
     }
+#ifdef USE_LIBSAMPLERATE
+    if(params.resample) {
+        snd_desc.sample_rate = params.resample;
+        printf("resampling to %dhz\n", snd_desc.sample_rate);
+    } else {
+        snd_desc.sample_rate = snd_info.samplerate;
+    }
+    snd_desc.sample_type = PCM_TYPE_FLOAT; // always -- libsndfile does the conversion for us
+    snd_desc.bits_per_channel = sizeof(float)*8;
+#else
     snd_desc.sample_rate = snd_info.samplerate;
-    snd_desc.channels_per_frame = snd_info.channels;
     snd_desc.sample_type = PCM_TYPE_SINT; // always -- libsndfile does the conversion for us
     snd_desc.bits_per_channel = sizeof(short)*8;
+#endif
+    snd_desc.channels_per_frame = snd_info.channels;
     snd_desc.bytes_per_frame = snd_info.channels * (snd_desc.bits_per_channel / 8);
     snd_desc.channel_mask = 0;
 
