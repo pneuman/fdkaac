@@ -52,10 +52,9 @@ AM_CONDITIONAL([FDK_PLATFORM_POSIX],[test "$X_PLATFORM" = "posix"])
 AM_CONDITIONAL([FDK_PLATFORM_WIN32],[test "$X_PLATFORM" = "win32"])
 
 
-AC_ARG_WITH(sndfile, [  --with-sndfile            use libsndfile for file IO])
+AC_ARG_WITH(sndfile, [  --with-sndfile          use libsndfile for file IO])
 if test "$with_sndfile" == "yes"
 then
-    #AC_MSG_NOTICE([You  enabled stuff. Good for you.])
     PKG_CHECK_MODULES(SNDFILE, sndfile >= 1.0.2, HAVE_SNDFILE="yes", HAVE_SNDFILE="no")
 
     if test "${HAVE_SNDFILE}" = "yes"
@@ -74,6 +73,30 @@ then
         AC_DEFINE(USE_LIBSNDFILE, 1, set to 1 if you have libsndfile)
     else
         AC_MSG_WARN("no libsndfile found on system")
+    fi
+fi
+
+AC_ARG_WITH(samplerate, [  --with-samplerate       enable on-the-fly resampling via libsamplerate (requires --with-sndfile)])
+if test "$with_samplerate" == "yes"
+then
+    PKG_CHECK_MODULES(SAMPLERATE, samplerate >= 0.1.7, HAVE_SAMPLERATE="yes", HAVE_SAMPLERATE="no")
+
+    if test "${HAVE_SAMPLERATE}" = "yes"
+    then
+        SAMPLERATE_LIBS=`echo ${SAMPLERATE_LIBS}`
+        SAMPLERATE_CFLAGS=`echo ${SAMPLERATE_CFLAGS}`
+
+        if test -n "${SAMPLERATE_LIBS}" ; then
+            LIBS="${SAMPLERATE_LIBS} ${LIBS}"
+        fi
+        LIBS="-lsamplerate ${LIBS}"
+
+        if test -n "${SAMPLERATE_CFLAGS}" ; then
+            CFLAGS="${SAMPLERATE_CFLAGS} ${CFLAGS}"
+        fi
+        AC_DEFINE(USE_LIBSAMPLERATE, 1, set to 1 if you have libsamplerate)
+    else
+        AC_MSG_WARN("no libsamplerate found on system")
     fi
 fi
 
