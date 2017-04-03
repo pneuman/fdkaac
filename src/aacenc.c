@@ -15,9 +15,7 @@
 int aacenc_is_sbr_active(const aacenc_param_t *params)
 {
     switch (params->profile) {
-    case AOT_SBR: case AOT_PS: case AOT_MP2_SBR: case AOT_MP2_PS:
-    case AOT_DABPLUS_SBR: case AOT_DABPLUS_PS:
-    case AOT_DRM_SBR: case AOT_DRM_MPEG_PS:
+    case AOT_SBR: case AOT_PS: 
         return 1;
     }
     if (params->profile == AOT_ER_AAC_ELD && params->lowdelay_sbr)
