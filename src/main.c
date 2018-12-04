@@ -938,14 +938,14 @@ int main(int argc, char **argv)
     if (frame_count < 0)
         goto END;
     if (m4af) {
-        uint32_t delay = aacinfo.encoderDelay;
+        uint32_t delay = aacinfo.nDelay;
 #ifdef USE_LIBSNDFILE
         int64_t frames_read = sf_seek(snd, 0, SEEK_CUR);
 #else
         int64_t frames_read = wav_get_position(wavf);
 #endif
         uint32_t padding = frame_count * aacinfo.frameLength
-                            - frames_read - aacinfo.encoderDelay;
+                            - frames_read - delay;
         m4af_set_priming(m4af, 0, delay >> downsampled_timescale,
                          padding >> downsampled_timescale);
         if (finalize_m4a(m4af, &params, encoder) < 0)
