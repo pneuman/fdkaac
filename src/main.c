@@ -938,11 +938,7 @@ int main(int argc, char **argv)
     if (frame_count < 0)
         goto END;
     if (m4af) {
-#if FDKENC_VER_AT_LEAST(4, 0)
         uint32_t delay = aacinfo.nDelay;
-#else
-        uint32_t delay = aacinfo.encoderDelay;
-#endif
 #ifdef USE_LIBSNDFILE
         int64_t frames_read = sf_seek(snd, 0, SEEK_CUR);
 #else
